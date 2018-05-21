@@ -194,7 +194,7 @@ void init()
   rendererAliasMap["6"] = "soft";
   rendererAliasMap["8"] = "volpack";
   rendererAliasMap["9"] = "rayrendcuda";
-  rendererAliasMap["9.1"] = "rayrendcuda";
+  rendererAliasMap["9.1"] = "rayrendscatter";
   rendererAliasMap["10"] = "rayrendfpu";
   rendererAliasMap["11"] = "rayrendsse2";
   rendererAliasMap["12"] = "rayrendsse4_1";

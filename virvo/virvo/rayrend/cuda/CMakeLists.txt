@@ -9,6 +9,7 @@ deskvox_link_libraries(virvo_fileio)
 
 set(RAYREND_HEADERS
     ../../vvraycaster.h
+    ../../vvraycaster.cpp
 )
 
 add_definitions(-DHAVE_CONFIG_H)
@@ -24,6 +25,7 @@ deskvox_add_library(rayrendcuda
 )
 
 set_target_properties(rayrendcuda PROPERTIES LINKER_LANGUAGE CXX)
+set_source_files_properties(../../vvraycaster.cpp PROPERTIES HEADER_FILE_ONLY ON)
 
 # MSVC + CUDA: link with legacy stdio library
 
