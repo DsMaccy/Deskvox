@@ -1172,23 +1172,23 @@ struct volume_kernel
                 else if (params.mode == Params::ShowEnvironmentMap) {
                     const float EPSILON = 0.001;
                     if (tex_coord.x - EPSILON <= 0) { // negx
-                        vector<2, S> tex_environment_coord(S(tex_coord.y), S(tex_coord.z));
+                        vector<2, S> tex_environment_coord(S(tex_coord.z), S(tex_coord.y));
                         result.color = tex2D(params.negx, tex_environment_coord);
                     }
                     else if (tex_coord.x + EPSILON >= 1) { // posx
-                        vector<2, S> tex_environment_coord(S(tex_coord.y), S(tex_coord.z));
+                        vector<2, S> tex_environment_coord(S(1 - tex_coord.z), S(tex_coord.y));
                         result.color = tex2D(params.posx, tex_environment_coord);
                     }
-                    else if (tex_coord.y - EPSILON <= 0) { // negy
-                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
-                        result.color = tex2D(params.negy, tex_environment_coord);
-                    }
-                    else if (tex_coord.y + EPSILON >= 1) { // posy
+                    else if (tex_coord.y - EPSILON <= 0) { // posy
                         vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
                         result.color = tex2D(params.posy, tex_environment_coord);
                     }
+                    else if (tex_coord.y + EPSILON >= 1) { // negy
+                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(1 - tex_coord.z));
+                        result.color = tex2D(params.negy, tex_environment_coord);
+                    }
                     else if (tex_coord.z - EPSILON <= 0) { // negz
-                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                        vector<2, S> tex_environment_coord(S(1 - tex_coord.x), S(tex_coord.y));
                         result.color = tex2D(params.negz, tex_environment_coord);
                     }
                     else { // posz
@@ -1447,23 +1447,33 @@ void readRGBA(const std::string & filename, environment_type & map_tex) {
     }
 
     int width, height;
-    std::vector<float> map_data;
+    std::vector<vec4> map_data;
     std::vector<unsigned char> rgba_temp;
 
     fread(&width, sizeof(int), 1, fp);
     fread(&height, sizeof(int), 1, fp);
 
-    // TODO: These sizes need to be width * height * 4...?
-    rgba_temp.resize(width * height);
+    rgba_temp.resize(width * height * 4);
+    fread(rgba_temp.data(), sizeof(char), width * height * 4, fp);
+    
     map_data.resize(width * height);
-    fread(rgba_temp.data(), sizeof(char), width * height, fp);
-
     // Convert bytes to float
     for (int index = 0; index < width * height; index++) {
-        map_data[index] = rgba_temp[index] / 255.0;
+        if (invert) {
+            map_data[index] = vec4(rgba_temp[4 * index] / 255.0,
+                                   rgba_temp[4 * index + 1] / 255.0,
+                                   rgba_temp[4 * index + 2] / 255.0,
+                                   rgba_temp[4 * index + 3] / 255.0);
+        }
+        else {
+            map_data[index] = vec4(rgba_temp[4 * index] / 255.0,
+                                   rgba_temp[4 * index + 1] / 255.0,
+                                   rgba_temp[4 * index + 2] / 255.0,
+                                   rgba_temp[4 * index + 3] / 255.0);
+        }
     }
     // TODO: This needs to be width, height
-    map_tex = environment_type(width / 4, height);
+    map_tex = environment_type(width, height);
     map_tex.reset(&map_data[0]);
     map_tex.set_address_mode(Clamp);
     map_tex.set_filter_mode(Linear);
@@ -1474,15 +1484,15 @@ void vvRayCaster::Impl::loadEnvironmentMap() {
     std::string map_directory = "Areskutan";
     ss << "E:\\Research Workspace\\Images\\Skyboxes\\" << map_directory << "\\Converted\\";
     std::string environment_directory = ss.str();
-    /**/
+    /*
     fillRGBA(1.0, 0.0, 0.0, posx);
     fillRGBA(0.0, 1.0, 0.0, posy);
     fillRGBA(0.0, 0.0, 1.0, posz);
     fillRGBA(1.0, 0.0, 0.0, negx);
     fillRGBA(0.0, 1.0, 0.0, negy);
     fillRGBA(0.0, 0.0, 1.0, negz);
+    */
     /**/
-    /*
     ss.str("");
     ss << environment_directory << "posx.png.RGBA";
     readRGBA(ss.str(), posx);
@@ -1506,7 +1516,7 @@ void vvRayCaster::Impl::loadEnvironmentMap() {
     ss.str("");
     ss << environment_directory << "negz.png.RGBA";
     readRGBA(ss.str(), negz);
-    */
+    /**/
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1925,8 +1935,8 @@ void vvRayCaster::renderVolumeGL()
     impl_->params.depth_buffer              = impl_->depth_buffer.data();
     impl_->params.depth_format              = depth_format;
     // For debugging
-    //impl_->params.mode                      = Impl::params_type::ShowEnvironmentMap;
-    impl_->params.mode                      = Impl::params_type::projection_mode(getParameter(VV_MIP_MODE).asInt());
+    impl_->params.mode                      = Impl::params_type::ShowEnvironmentMap;
+    //impl_->params.mode                      = Impl::params_type::projection_mode(getParameter(VV_MIP_MODE).asInt());
     impl_->params.depth_test                = depth_test;
     impl_->params.opacity_correction        = getParameter(VV_OPCORR);
     impl_->params.early_ray_termination     = getParameter(VV_TERMINATEEARLY);
