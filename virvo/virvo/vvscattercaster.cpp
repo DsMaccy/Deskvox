@@ -20,9 +20,7 @@
 
 // Dylan -- added imports
 #include <sstream>
-#ifdef VV_ARCH_CUDA
 #define DEBUG_CUDA
-#endif
 // End Dylan
 
 
@@ -33,10 +31,7 @@
 #include <type_traits>
 
 #include <GL/glew.h>
-
-#ifdef VV_ARCH_CUDA
 #include <thrust/device_vector.h>
-#endif
 
 #undef MATH_NAMESPACE
 
@@ -53,10 +48,7 @@
 #include <visionaray/scheduler.h>
 #include <visionaray/shade_record.h>
 #include <visionaray/variant.h>
-
-#ifdef VV_ARCH_CUDA
 #include <visionaray/cuda/pixel_pack_buffer.h>
-#endif
 
 #undef MATH_NAMESPACE
 
@@ -69,11 +61,9 @@
 //#include "../../../../Program Files/NVIDIA GPU Computing Toolkit/CUDA/v9.1/include/cuda_runtime_api.h"
 //#include "cuda/texture.h"
 
-#ifdef VV_ARCH_CUDA
 #include "../../../../Program Files/NVIDIA GPU Computing Toolkit/CUDA/v9.1/include/cuda_runtime_api.h"
 #include "cuda/texture.h"
 #include "cuda/utils.h"
-#endif
 
 using namespace visionaray;
 
@@ -82,31 +72,15 @@ using namespace visionaray;
 // Global typedefs
 //
 
-#if defined(VV_ARCH_CUDA)
 using ray_type          = basic_ray<float>;
 using sched_type        = cuda_sched<ray_type>;
 using transfunc_type    = cuda_texture<vec4,      1>;
 using volume8_type      = cuda_texture<unorm< 8>, 3>;
 using volume16_type     = cuda_texture<unorm<16>, 3>;
 using volume32_type     = cuda_texture<float,     3>;
-using pit_type          = cuda_texture<float, 2>;            // TODO: Create a volume of color values
+using pit_type          = cuda_texture<float, 2>;           // TODO: Create a volume of color values
 using ext_vol_type      = cuda_texture<float, 3>;           // TODO: Utliize this type
-#else
-#if defined(VV_ARCH_SSE2) || defined(VV_ARCH_SSE4_1)
-using ray_type = basic_ray<simd::float4>;
-#elif defined(VV_ARCH_AVX) || defined(VV_ARCH_AVX2)
-using ray_type = basic_ray<simd::float8>;
-#else
-using ray_type = basic_ray<float>;
-#endif
-using sched_type        = tiled_sched<ray_type>;
-using transfunc_type    = texture<vec4,      1>;
-using volume8_type      = texture<unorm< 8>, 3>;
-using volume16_type     = texture<unorm<16>, 3>;
-using volume32_type     = texture<float,     3>;
-using pit_type          = texture<float, 2>;                 // TODO: Create a volume of color values
-using ext_vol_type      = texture<float, 3>;                // TODO: Utliize this type
-#endif
+using environment_type  = cuda_texture<vec4, 2>;            // TODO: Utliize this type
 
 //-------------------------------------------------------------------------------------------------
 // Ray type, depends upon target architecture
@@ -377,26 +351,6 @@ void SVT<T>::build(Tex transfunc, std::vector<vec4> values_as_vector, bool opaci
 // Misc. helpers
 //
 
-template <typename T, typename Tex>
-VSNRAY_FUNC
-inline vector<3, T> gradient(Tex const& tex, vector<3, T> tex_coord)
-{
-    vector<3, T> s1;
-    vector<3, T> s2;
-
-    float DELTA = 0.01f;
-
-    s1.x = tex3D(tex, tex_coord + vector<3, T>(DELTA, 0.0f, 0.0f));
-    s2.x = tex3D(tex, tex_coord - vector<3, T>(DELTA, 0.0f, 0.0f));
-    // signs for y and z are swapped because of texture orientation
-    s1.y = tex3D(tex, tex_coord - vector<3, T>(0.0f, DELTA, 0.0f));
-    s2.y = tex3D(tex, tex_coord + vector<3, T>(0.0f, DELTA, 0.0f));
-    s1.z = tex3D(tex, tex_coord - vector<3, T>(0.0f, 0.0f, DELTA));
-    s2.z = tex3D(tex, tex_coord + vector<3, T>(0.0f, 0.0f, DELTA));
-
-    return s2 - s1;
-}
-
 template <typename F, typename I>
 VSNRAY_FUNC
 inline F normalize_depth(I const& depth, pixel_format depth_format, F /* */)
@@ -445,37 +399,6 @@ inline void get_depth(I1 x, I1 y, I2& depth_raw, Params const& params)
                 params.depth_buffer
                 );
     }
-}
-
-VSNRAY_FUNC
-inline vec3 gatherv(vec3 const* base_addr, int index)
-{
-    return base_addr[index];
-}
-
-template <
-    typename T,
-    typename I,
-    typename = typename std::enable_if<simd::is_simd_vector<T>::value>::type
-    >
-VSNRAY_CPU_FUNC
-inline vector<3, T> gatherv(vector<3, T> const* base_addr, I const& index)
-{
-    // basically like visionaray::simd::gather, but
-    // base_addr points to vec3's of simd-vectors
-
-    typename simd::aligned_array<I>::type indices;
-    store(indices, index);
-
-    array<vector<3, float>, simd::num_elements<T>::value> arr;
-
-    for (int i = 0; i < simd::num_elements<T>::value; ++i)
-    {
-        auto vecs = unpack(base_addr[indices[i]]);
-        arr[i] = vecs[i];
-    }
-
-    return simd::pack(arr);
 }
 
 
@@ -868,12 +791,14 @@ struct volume_kernel_params
         ShowExtinction,
         ShowPit,
         ShowRadiance,
+        ShowEnvironmentMap
     };
 
-    using clip_object    = variant<clip_plane, clip_sphere, clip_cone>;
-    using transfunc_ref  = typename transfunc_type::ref_type;
-    using pit_type_ref   = typename pit_type::ref_type;
-    using ext_vol_type_ref = typename ext_vol_type::ref_type;
+    using clip_object           = variant<clip_plane, clip_sphere, clip_cone>;
+    using transfunc_ref         = typename transfunc_type::ref_type;
+    using pit_type_ref          = typename pit_type::ref_type;
+    using ext_vol_type_ref      = typename ext_vol_type::ref_type;
+    using environment_type_ref  = typename environment_type::ref_type;
 
     clip_box                    bbox;
     float                       delta;
@@ -891,8 +816,8 @@ struct volume_kernel_params
     recti                       viewport;
     point_light<float>          light;
     pit_type_ref                pit;
-    //SVT<float> const*           extinction_volume;
     ext_vol_type_ref            extinction_volume;
+    environment_type_ref        posx, posy, posz, negx, negy, negz;
     float                       ambient_radius;
     float                       albedo;
     float                       anisotropy;
@@ -1035,80 +960,11 @@ struct volume_kernel
                 for (int i = 0; i < params.num_channels; ++i)                               // THIS LOOP CAN BE CONSIDERED TO HAVE ITERATION OF 1
                 {
                     S voxel = tex3D(volumes[i], tex_coord);                                // ALGO line 5/6
-
-                    // colori_g is used for the ambient scattering
-                    C colori_g = tex1D(params.transfuncs[i], voxel);
-
-                    
-                    auto do_shade = params.local_shading && colori_g.w >= 0.1f;
-
-                    if (visionaray::any(do_shade)) {
-                        // TODO: make this modifiable
-                        
-                        plastic<S> mat;
-                        mat.ca() = from_rgb(vector<3, S>(0.3f, 0.3f, 0.3f));
-                        mat.cd() = from_rgb(vector<3, S>(0.8f, 0.8f, 0.8f));
-                        mat.cs() = from_rgb(vector<3, S>(0.8f, 0.8f, 0.8f));
-                        mat.ka() = 1.0f;
-                        mat.kd() = 1.0f;
-                        mat.ks() = 1.0f;
-                        mat.specular_exp() = 1000.0f;
-
-                        // calculate shading
-                        auto grad = gradient(volumes[i], tex_coord);
-                        auto normal = normalize(grad);
-                        
-                        auto float_eq = [&](S const& a, S const& b) { return abs(a - b) < params.delta * S(0.5); };
-
-                        Mask at_boundary = float_eq(t, hit_rec.tnear);
-                        I clip_normal_index = select(
-                                at_boundary,
-                                I(num_clip_objects), // bbox normal is stored at last position in the list
-                                I(0)
-                                );
-
-                        for (int i = 0; i < num_clip_objects; ++i)
-                        {
-                            Mask hit = float_eq(t, clip_intervals[i].y + params.delta); // TODO: understand why +delta
-                            clip_normal_index = select(hit, I(i), clip_normal_index);
-                            at_boundary |= hit;
-                        }
-
-                        if (visionaray::any(at_boundary))
-                        {
-                            auto boundary_normal = gatherv(clip_normals, clip_normal_index);
-                            normal = select(
-                                    at_boundary,
-                                    boundary_normal * colori_g.w + normal * (S(1.0) - colori_g.w),
-                                    normal
-                                    );
-                        }
-
-                        do_shade &= length(grad) != 0.0f;
-                        
-                        shade_record<S> sr;
-                        sr.normal = normal;
-                        sr.geometric_normal = normal;
-                        sr.view_dir = -ray.dir;
-                        sr.tex_color = vector<3, S>(1.0);
-                        sr.light_dir = normalize(params.light.position());
-                        sr.light_intensity = params.light.intensity(pos);
-
-                        auto shaded_clr = mat.shade(sr);
-
-                        // TODO: Consider whether this line needs to be commented out
-                        colori_g.xyz() = mul(
-                                colori_g.xyz(),
-                                to_rgb(shaded_clr),
-                                do_shade,
-                                colori_g.xyz()
-                                );
-                    }
-//#else               
+                      
                     // Dylan
-
                     // color_i is used for the volume scattering
                     C colori = tex1D(params.transfuncs[i], voxel);                          // ALGO line 7 -- Note: extinction coefficient is colori.w
+
                     // Sample Ambient Exctinction Volume      --      ALGO: line 9 -- sigma_hat
                     {   // put in compound statement to avoid compiler warning about overriding variable names
                         float max_x = tex_coord.x + params.ambient_radius / params.bbox.size().x;
@@ -1139,7 +995,7 @@ struct volume_kernel
                     }
                     ++ray_count;
 
-                    // TODO: sample preint. table and radiance cache       ALGO: lines 15 and 16
+                                                                                                    // ALGO: lines 15 and 16
                     if (params.local_shading) {
 
                         // Handle lighting from light source and sample cached info
@@ -1229,29 +1085,15 @@ struct volume_kernel
                         }
                     }
                     // End Dylan
-//#endif
-
-                    
-                    
-                    // TODO: Consider whether these alpha modifications need to be executed
-                    // Not optional
                     
                     if (params.opacity_correction)
                     {
                         colori.w = 1.0f - pow(1.0f - colori.w, params.delta);
-                        colori_g.w = 1.0f - pow(1.0f - colori_g.w, params.delta);
                     }
 
                     // premultiplied alpha
-//#ifdef USE_OLD
-                    colori_g.xyz() *= colori_g.w;
-//#else
                     colori.xyz() *= (colori.w * params.delta * T * L_out * L_d);// *S(params.albedo));                                    // ALGO line 17 and 19 Part A
-
-
-                    //TODO: This line of code changes between old and new methods
-                    color += colori;                                                                // ALGO line 19 Part B
-                    //color += colori_g;
+                    color += colori;
 
                     // Calculate the T factor for exponential light decay
                     auto pos_not = vector<3, S>(
@@ -1313,7 +1155,6 @@ struct volume_kernel
                             C(0.0)
                             );
                 }
-//#ifndef USE_OLD
                 else if (params.mode == Params::ShowExtinction)
                 {
                     result.color = C(result.color.x + mean_extinction, result.color.x + mean_extinction, result.color.x + mean_extinction, 1.0);
@@ -1328,11 +1169,39 @@ struct volume_kernel
                     if (rayMarchCount == 0) { rayMarchCount = 1; }
                     result.color += C(L_d) * params.delta * T * S(params.albedo);
                 }
-//#endif
+                else if (params.mode == Params::ShowEnvironmentMap) {
+                    const float EPSILON = 0.001;
+                    if (tex_coord.x - EPSILON <= 0) { // negx
+                        vector<2, S> tex_environment_coord(S(tex_coord.y), S(tex_coord.z));
+                        result.color = tex2D(params.negx, tex_environment_coord);
+                    }
+                    else if (tex_coord.x + EPSILON >= 1) { // posx
+                        vector<2, S> tex_environment_coord(S(tex_coord.y), S(tex_coord.z));
+                        result.color = tex2D(params.posx, tex_environment_coord);
+                    }
+                    else if (tex_coord.y - EPSILON <= 0) { // negy
+                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
+                        result.color = tex2D(params.negy, tex_environment_coord);
+                    }
+                    else if (tex_coord.y + EPSILON >= 1) { // posy
+                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
+                        result.color = tex2D(params.posy, tex_environment_coord);
+                    }
+                    else if (tex_coord.z - EPSILON <= 0) { // negz
+                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                        result.color = tex2D(params.negz, tex_environment_coord);
+                    }
+                    else { // posz
+                        vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                        result.color = tex2D(params.posz, tex_environment_coord);
+                    }
+                    break;
+                }
             }
+
             // step on
-            t = tnext;                                          // ALGO line 23
-        }
+            t = tnext;
+        } // end while (visionaray::any)
         if (params.mode == Params::ShowExtinction)
         {
             // Invert white and black (white means highly ambient and black means heavily dense
@@ -1354,23 +1223,11 @@ struct volume_kernel
 
 struct vvRayCaster::Impl
 {
-#if defined(VV_ARCH_CUDA)
     Impl()
         : sched(8, 8)
     {
     }
-#else
-    Impl()
-        : sched(vvToolshed::getNumProcessors())
-    {
-        char* num_threads = getenv("VV_NUM_THREADS");
-        if (num_threads != nullptr)
-        {
-            std::string str(num_threads);
-            sched.reset(std::stoi(str));
-        }
-    }
-#endif
+
 
     using params_type = volume_kernel_params;
 
@@ -1379,18 +1236,18 @@ struct vvRayCaster::Impl
     pit_type                        pit;
     SVT<float>                      extinction_volume_svt;
     ext_vol_type                    extinction_volume_texture;
-    //ext_vol_type                  extinction_volume_svt;
+    environment_type                posx, posy, posz, negx, negy, negz;
     std::vector<volume8_type>       volumes8;
     std::vector<volume16_type>      volumes16;
     std::vector<volume32_type>      volumes32;
-    //transfunc_cpu_type            cpu_transfunc;
-    std::vector<vec4>              transfunc_values;
+    std::vector<vec4>               transfunc_values;
     std::vector<transfunc_type>     transfuncs;
     depth_buffer_type               depth_buffer;
 
     // Internal storage format for textures
     virvo::PixelFormat              texture_format = virvo::PF_R8;
 
+    void loadEnvironmentMap();
     void loadPreintegrationTable(float albedo);
     void updateVolumeTextures(vvVolDesc* vd, vvRenderer* renderer);
     void updateTransfuncTexture(vvVolDesc* vd, vvRenderer* renderer);
@@ -1522,9 +1379,6 @@ void vvRayCaster::Impl::loadPreintegrationTable(float albedo)
     float		m_sphere_r;				// radius of sphere 
     float*		m_L;					// radiance data (theta, sigmat)
 
-                                        // table parameters
-
-
     fread(&m_a, sizeof(float), 1, fp);
     fread(&m_g, sizeof(float), 1, fp);
     fread(&m_N, sizeof(int), 1, fp);
@@ -1534,7 +1388,7 @@ void vvRayCaster::Impl::loadPreintegrationTable(float albedo)
     fread(&m_sigmat_max, sizeof(float), 1, fp);
     fread(&m_sphere_r, sizeof(float), 1, fp);
 
-    // rshoadiance data
+    // radiance data
     // m_L = new float[m_theta_res * m_sigmat_res];a
     pit_data.resize(m_theta_res * m_sigmat_res);
     fread(pit_data.data(), sizeof(float), m_sigmat_res * m_theta_res, fp);
@@ -1558,6 +1412,101 @@ void vvRayCaster::Impl::loadPreintegrationTable(float albedo)
     pit.reset(&pit_data[0]);
     pit.set_address_mode(Clamp);
     pit.set_filter_mode(Linear);
+}
+
+
+//-------------------------------------------------------------------------------------------------
+// Load Environment Map
+//
+
+// This method fills a 2D texture with a solid color
+void fillRGBA(float R, float G, float B,environment_type & map_tex) {
+    
+    int width = 512;
+    int height = 512;
+    std::vector<vec4> map_data;
+
+    map_data.resize(width * height);
+
+    // Convert bytes to float
+    for (int index = 0; index < width * height; index++) {
+        map_data[index + 0] = vec4(R, G, B, 1.0f);
+    }
+    // TODO: This needs to be width, height
+    map_tex = environment_type(width, height);
+    map_tex.reset(&map_data[0]);
+    map_tex.set_address_mode(Clamp);
+    map_tex.set_filter_mode(Linear);
+}
+
+void readRGBA(const std::string & filename, environment_type & map_tex) {
+    FILE * fp = fopen(filename.c_str(), "rb");
+    if (fp == nullptr) {
+        std::cout << "Could not load from file: " << filename << std::endl;
+        throw;
+    }
+
+    int width, height;
+    std::vector<float> map_data;
+    std::vector<unsigned char> rgba_temp;
+
+    fread(&width, sizeof(int), 1, fp);
+    fread(&height, sizeof(int), 1, fp);
+
+    // TODO: These sizes need to be width * height * 4...?
+    rgba_temp.resize(width * height);
+    map_data.resize(width * height);
+    fread(rgba_temp.data(), sizeof(char), width * height, fp);
+
+    // Convert bytes to float
+    for (int index = 0; index < width * height; index++) {
+        map_data[index] = rgba_temp[index] / 255.0;
+    }
+    // TODO: This needs to be width, height
+    map_tex = environment_type(width / 4, height);
+    map_tex.reset(&map_data[0]);
+    map_tex.set_address_mode(Clamp);
+    map_tex.set_filter_mode(Linear);
+}
+
+void vvRayCaster::Impl::loadEnvironmentMap() {
+    std::stringstream ss;
+    std::string map_directory = "Areskutan";
+    ss << "E:\\Research Workspace\\Images\\Skyboxes\\" << map_directory << "\\Converted\\";
+    std::string environment_directory = ss.str();
+    /**/
+    fillRGBA(1.0, 0.0, 0.0, posx);
+    fillRGBA(0.0, 1.0, 0.0, posy);
+    fillRGBA(0.0, 0.0, 1.0, posz);
+    fillRGBA(1.0, 0.0, 0.0, negx);
+    fillRGBA(0.0, 1.0, 0.0, negy);
+    fillRGBA(0.0, 0.0, 1.0, negz);
+    /**/
+    /*
+    ss.str("");
+    ss << environment_directory << "posx.png.RGBA";
+    readRGBA(ss.str(), posx);
+    
+    ss.str("");
+    ss << environment_directory << "posy.png.RGBA";
+    readRGBA(ss.str(), posy);
+
+    ss.str("");
+    ss << environment_directory << "posz.png.RGBA";
+    readRGBA(ss.str(), posz);
+    
+    ss.str("");
+    ss << environment_directory << "negx.png.RGBA";
+    readRGBA(ss.str(), negx);
+
+    ss.str("");
+    ss << environment_directory << "negy.png.RGBA";
+    readRGBA(ss.str(), negy);
+
+    ss.str("");
+    ss << environment_directory << "negz.png.RGBA";
+    readRGBA(ss.str(), negz);
+    */
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1596,9 +1545,15 @@ vvRayCaster::vvRayCaster(vvVolDesc* vd, vvRenderState renderState)
     impl_->params.albedo = 0.9;
     impl_->params.anisotropy = 0.9;
     impl_->params.ambient_radius = 10;      //impl_->params.delta / 4;
+    impl_->loadEnvironmentMap();
     impl_->loadPreintegrationTable(impl_->params.albedo);
     impl_->params.pit = typename pit_type::ref_type(impl_->pit);
-    
+    impl_->params.posx = typename environment_type::ref_type(impl_->posx);
+    impl_->params.posy = typename environment_type::ref_type(impl_->posy);
+    impl_->params.posz = typename environment_type::ref_type(impl_->posz);
+    impl_->params.negx = typename environment_type::ref_type(impl_->negx);
+    impl_->params.negy = typename environment_type::ref_type(impl_->negy);
+    impl_->params.negz = typename environment_type::ref_type(impl_->negz);
     // TODO: Move extinction volume code to be handled whenever the transfer function is updated
     
 #ifdef DEBUG_CUDA
@@ -1610,14 +1565,10 @@ vvRayCaster::vvRayCaster(vvVolDesc* vd, vvRenderState renderState)
     bounding_box.min = vec3i(0, 0, 0);
     bounding_box.max = vec3i(vd->getBoundingBox().size().x, vd->getBoundingBox().size().y, vd->getBoundingBox().size().z);
     impl_->extinction_volume_svt.reset(vd, bounding_box);
-#ifdef DEBUG_CUDA
-    std::cerr << __LINE__ << ' ' << cudaGetErrorString(cudaGetLastError()) << '\n';
-#endif
     impl_->extinction_volume_texture = ext_vol_type(vd->getSize().x, vd->getSize().y, vd->getSize().z);// vd->getSize().x, vd->getSize().y, vd->getSize().z);
     impl_->extinction_volume_texture.reset(impl_->extinction_volume_svt.data());
     impl_->extinction_volume_texture.set_address_mode(Clamp);
     impl_->extinction_volume_texture.set_filter_mode(Linear);
-
     impl_->params.extinction_volume = typename ext_vol_type::ref_type(impl_->extinction_volume_texture);
 #ifdef DEBUG_CUDA
     std::cerr << __LINE__ << ' ' << cudaGetErrorString(cudaGetLastError()) << '\n';
@@ -1974,7 +1925,7 @@ void vvRayCaster::renderVolumeGL()
     impl_->params.depth_buffer              = impl_->depth_buffer.data();
     impl_->params.depth_format              = depth_format;
     // For debugging
-    //impl_->params.mode                      = Impl::params_type::ShowPit;
+    //impl_->params.mode                      = Impl::params_type::ShowEnvironmentMap;
     impl_->params.mode                      = Impl::params_type::projection_mode(getParameter(VV_MIP_MODE).asInt());
     impl_->params.depth_test                = depth_test;
     impl_->params.opacity_correction        = getParameter(VV_OPCORR);
