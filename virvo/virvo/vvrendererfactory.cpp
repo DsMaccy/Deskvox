@@ -260,7 +260,12 @@ static bool archSupported(std::string const& arch)
     return true;
   }
 
-  if (arch == "cuda" || arch == "scatter")
+  if (arch == "scatter")
+  {
+    return true;
+  }
+
+  if (arch == "cuda")
   {
 #if VV_HAVE_CUDA
     return virvo::cuda::deviceCount() > 0;
