@@ -20,6 +20,8 @@
 
 // Dylan -- added imports
 #include <sstream>
+#include <curand_kernel.h>
+//#include "../../../../Program Files/NVIDIA GPU Computing Toolkit/CUDA/v9.1/include/curand.h"
 #define DEBUG_CUDA
 // End Dylan
 
@@ -350,6 +352,35 @@ void SVT<T>::build(Tex transfunc, std::vector<vec4> values_as_vector, bool opaci
 //-------------------------------------------------------------------------------------------------
 // Misc. helpers
 //
+#ifdef __CUDA_ARCH__
+
+
+
+class CudaRandHelper {
+    private:
+        __device__
+        static void init(curandState * curandHelperState) {
+            static bool initialized = false;
+            if (!initialized) {
+                curand_init(0, 0, 0, curandHelperState);
+                initialized = true;
+            }
+        }
+    public:
+        __device__
+        static float get_rand(curandState * curandHelperState) {
+            init(curandHelperState);
+            return curand_uniform(curandHelperState);
+        }
+};
+
+
+__device__
+float get_uniform_random() {
+    static curandState curandHelperState;
+    return CudaRandHelper::get_rand(&curandHelperState);
+}
+#endif
 
 template <typename F, typename I>
 VSNRAY_FUNC
@@ -821,6 +852,7 @@ struct volume_kernel_params
     float                       ambient_radius;
     float                       albedo;
     float                       anisotropy;
+    curandState                 curandDeviceState;
 
     struct
     {
@@ -846,6 +878,10 @@ struct volume_kernel
         : params(p)
         , volumes(vols)
     {
+        static int seed = 0;
+#ifdef __CUDA_ARCH__
+        curand_init(seed++, 0, 0, &(params.curandDeviceState));
+#endif
     }
 
     template <typename R>
@@ -865,7 +901,7 @@ struct volume_kernel
         S T = 1.f;
         S tau = 0.f;
         S L_out = 1.0;
-        S L_d = 1.0;
+        vector<3, S> L_d = vector<3, S>(1.0, 1.0, 1.0);
         int rayMarchCount = 0;
         int ray_count = 0;
         S scattering_coefficient = 1.0;
@@ -998,12 +1034,149 @@ struct volume_kernel
                                                                                                     // ALGO: lines 15 and 16
                     if (params.local_shading) {
 
+
+                        /* HERE AS REFERENCE
+                        if (tex_coord.x - EPSILON <= 0) { // negx
+                            vector<2, S> tex_environment_coord(S(tex_coord.z), S(tex_coord.y));
+                            map_pixel = tex2D(params.negx, tex_environment_coord);
+                        }
+                        else if (tex_coord.x + EPSILON >= 1) { // posx
+                            vector<2, S> tex_environment_coord(S(1 - tex_coord.z), S(tex_coord.y));
+                            map_pixel = tex2D(params.posx, tex_environment_coord);
+                        }
+                        else if (tex_coord.y - EPSILON <= 0) { // posy
+                            vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
+                            map_pixel = tex2D(params.posy, tex_environment_coord);
+                        }
+                        else if (tex_coord.y + EPSILON >= 1) { // negy
+                            vector<2, S> tex_environment_coord(S(tex_coord.x), S(1 - tex_coord.z));
+                            map_pixel = tex2D(params.negy, tex_environment_coord);
+                        }
+                        else if (tex_coord.z - EPSILON <= 0) { // negz
+                            vector<2, S> tex_environment_coord(S(1 - tex_coord.x), S(tex_coord.y));
+                            map_pixel = tex2D(params.negz, tex_environment_coord);
+                        }
+                        else { // posz
+                            vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                            map_pixel = tex2D(params.posz, tex_environment_coord);
+                        }
+                        */
                         // Handle lighting from light source and sample cached info
-                        auto position_delta = vector<3, S>(
-                            pos.x - params.light.position().x,
-                            pos.y - params.light.position().y,
-                            pos.z - params.light.position().z
-                            );
+
+                        //***ENVIRONMENT_MAP_CODE: PICK A POINT ON THE ENVIRONMENT MAP***/
+                        vector<3, S> position_delta;
+                        vec3 light_ray_pos;
+                        // 1: Using light source (not using environment map)
+                        {
+                            position_delta = vector<3, S>(
+                                pos.x - params.light.position().x,
+                                pos.y - params.light.position().y,
+                                pos.z - params.light.position().z
+                                );
+
+                            light_ray_pos = params.light.position();                                       // Start at the light position
+                            L_d = vector<3, S>(1.0);
+                        }
+
+                        // 2: Using closest point (closest direction out of the volume)
+                        // TODO: Broken
+                        {
+                            float X = (0.5 - tex_coord.x);
+                            float Y = (0.5 - tex_coord.y);
+                            float Z = (0.5 - tex_coord.z);
+                            position_delta = normalize(vector<3, S>(X, Y, Z));
+                            light_ray_pos = pos - position_delta * sqrt(params.bbox.size().x*params.bbox.size().x + params.bbox.size().y*params.bbox.size().y + params.bbox.size().z*params.bbox.size().z);
+                            C map_pixel;
+
+                            if (abs(X) >= abs(Y) && abs(X) >= abs(Z)) {
+                                if (X > 0) {
+                                    vector<2, S> tex_environment_coord(S(1 - tex_coord.z), S(tex_coord.y));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.posx, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.z), S(tex_coord.y));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.negx, tex_environment_coord);
+                                }
+                            }
+                            else if (abs(Y) >= abs(X) && abs(Y) >= abs(Z)) {
+                                if (Y > 0) {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.posy, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(1 - tex_coord.z));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.negy, tex_environment_coord);
+                                }
+                            }
+                            else {
+                                if (Z > 0) {
+                                    vector<2, S> tex_environment_coord(S(1 - tex_coord.x), S(tex_coord.y));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.negz, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                                    tex_environment_coord = normalize(tex_environment_coord);
+                                    map_pixel = tex2D(params.posz, tex_environment_coord);
+                                }
+                            }
+                            L_d = vector<3, S>(map_pixel.x, map_pixel.y, map_pixel.z);
+                        }
+
+                        // 3: Use random light position to determine the direction for the light source
+                        {
+#ifdef __CUDA_ARCH__
+                            /*
+                            float X = 2 * (get_uniform_random() - 0.5);
+                            float Y = 2 * (get_uniform_random() - 0.5);
+                            float Z = 2 * (get_uniform_random() - 0.5);
+                            position_delta = normalize(vector<3, S>(X, Y, Z));
+                            light_ray_pos = pos - position_delta * sqrt(params.bbox.size().x*params.bbox.size().x + params.bbox.size().y*params.bbox.size().y + params.bbox.size().z*params.bbox.size().z);
+                            C map_pixel;
+
+                            if (abs(X) >= abs(Y) && abs(X) >= abs(Z)) {
+                                if (X > 0) {
+                                    vector<2, S> tex_environment_coord(S(1 - tex_coord.z), S(tex_coord.y));
+                                    map_pixel = tex2D(params.posx, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.z), S(tex_coord.y));
+                                    map_pixel = tex2D(params.negx, tex_environment_coord);
+                                }
+                            }
+                            else if (abs(Y) >= abs(X) && abs(Y) >= abs(Z)) {
+                                if (Y > 0) {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.z));
+                                    map_pixel = tex2D(params.posy, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(1 - tex_coord.z));
+                                    map_pixel = tex2D(params.negy, tex_environment_coord);
+                                }
+                            }
+                            else {
+                                if (Z > 0) {
+                                    vector<2, S> tex_environment_coord(S(1 - tex_coord.x), S(tex_coord.y));
+                                    map_pixel = tex2D(params.negz, tex_environment_coord);
+                                }
+                                else {
+                                    vector<2, S> tex_environment_coord(S(tex_coord.x), S(tex_coord.y));
+                                    map_pixel = tex2D(params.posz, tex_environment_coord);
+                                }
+                            }
+                            L_d = vector<3, S>(map_pixel.x, map_pixel.y, map_pixel.z);
+                            */
+#endif
+                        }
+
+
+                        // ***End Environment Map Code***
+
+                        L_d *= params.light.constant_attenuation();
 
                         auto light_omega = normalize(position_delta);                               // ALGO line 12
                         S angle = dot(normalize(ray.dir), normalize(light_omega));
@@ -1018,10 +1191,6 @@ struct volume_kernel
                         // ALGO line 15
                         L_out = tex2D(params.pit, pit_coordinate);
 
-                        // Calculate the Radiance from the light source to the current position
-                        vec3 light_ray_pos = params.light.position();                                       // Start at the light position
-
-                        L_d = params.light.constant_attenuation();
                         bool first = true;
 
                         // TODO: This does not use linear interpolation to mititgate mid-sphere values
@@ -1074,12 +1243,10 @@ struct volume_kernel
                                     );
 
                                 S light_path_radiance(tex2D(params.pit, light_pit_coordinate));
-                                L_d = L_d * light_path_radiance; //C(light_path_radiance);
+                                L_d = L_d * light_path_radiance;
                             }
 
-
                             // Multiply light radiance by view radiance
-
                             rayMarchCount++;
 
                         }
@@ -1167,7 +1334,8 @@ struct volume_kernel
                 else if (params.mode == Params::ShowRadiance)
                 {
                     if (rayMarchCount == 0) { rayMarchCount = 1; }
-                    result.color += C(L_d) * params.delta * T * S(params.albedo);
+                    S mag = sqrt(L_d.x*L_d.x + L_d.y*L_d.y + L_d.z*L_d.z);
+                    result.color += C(L_d.x, L_d.y, L_d.z, mag) * params.delta * T * S(params.albedo);
                 }
                 else if (params.mode == Params::ShowEnvironmentMap) {
                     const float EPSILON = 0.001;
@@ -1208,9 +1376,11 @@ struct volume_kernel
             if (ray_count == 0) { ray_count = 1; }
             result.color = C(1 - (result.color.x / ray_count), 1 - (result.color.y / ray_count), 1 - (result.color.z / ray_count), 1.0);
         }
+
         result.hit = hit_rec.hit;
         return result;
     }
+
 
     Params params;
     VolRef const* volumes;
@@ -1531,7 +1701,6 @@ vvRayCaster::vvRayCaster(vvVolDesc* vd, vvRenderState renderState)
 
     glewInit();
 
-#if defined(VV_ARCH_CUDA)
     virvo::cuda::initGlInterop();
 
     virvo::RenderTarget* rt = virvo::PixelUnpackBufferRT::create(virvo::PF_RGBA32F, virvo::PF_UNSPECIFIED);
@@ -1542,9 +1711,6 @@ vvRayCaster::vvRayCaster(vvVolDesc* vd, vvRenderState renderState)
         rt = virvo::DeviceBufferRT::create(virvo::PF_RGBA32F, virvo::PF_UNSPECIFIED);
     }
     setRenderTarget(rt);
-#else
-    setRenderTarget(virvo::HostBufferRT::create(virvo::PF_RGBA32F, virvo::PF_UNSPECIFIED));
-#endif
 
     // Handle Preintegration tables
 
@@ -1935,8 +2101,8 @@ void vvRayCaster::renderVolumeGL()
     impl_->params.depth_buffer              = impl_->depth_buffer.data();
     impl_->params.depth_format              = depth_format;
     // For debugging
-    impl_->params.mode                      = Impl::params_type::ShowEnvironmentMap;
-    //impl_->params.mode                      = Impl::params_type::projection_mode(getParameter(VV_MIP_MODE).asInt());
+    //impl_->params.mode                      = Impl::params_type::ShowEnvironmentMap;
+    impl_->params.mode                      = Impl::params_type::projection_mode(getParameter(VV_MIP_MODE).asInt());
     impl_->params.depth_test                = depth_test;
     impl_->params.opacity_correction        = getParameter(VV_OPCORR);
     impl_->params.early_ray_termination     = getParameter(VV_TERMINATEEARLY);
